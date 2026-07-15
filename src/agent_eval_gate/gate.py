@@ -46,12 +46,13 @@ async def run_suts(config: EvalConfig, tasks: list[Task], selected_frameworks: O
                 output = await _run_sut(client, framework, task)
                 results[framework][task.id] = output
             except Exception as exc:
-                # Record failure but continue
-                from agent_eval_gate.protocols import SUTOutput
                 from agent_eval_gate.suts.base import make_sut_output
-                output = make_sut_output(task, framework, client.model, f"ERROR: {exc}")
-                output.raw_text = f"ERROR: {exc}"
+                err_msg = f"ERROR: {exc}"[:500]
+                output = make_sut_output(task, framework, client.model, err_msg)
+                output.raw_text = err_msg
                 results[framework][task.id] = output
+            await asyncio.sleep(0.3)
+        await asyncio.sleep(0.5)
     return results
 
 
@@ -89,18 +90,83 @@ def compute_pairwise_ranking(
     sut_outputs: dict[str, dict[str, SUTOutput]],
     verdicts: dict[str, dict[str, ItemVerdict]],
 ) -> Optional[OrdinalRanking]:
+    """Rank SUTs via per-task pairwise comparison, aggregating wins.
+
+    Comparing on a single task (the old behavior) is noise when all SUTs
+    return the same answer — the judge picks a deterministic but meaningless
+    winner. Instead we run pairwise on EACH task where SUT outputs diverge,
+    and aggregate wins across all such tasks. Tasks where every SUT returns
+    identical output contribute no signal and are skipped.
+    """
     judge_client = config.get_judge_client()
-    # Rank on the first task for demo purposes
     if not tasks:
         return None
-    task = tasks[0]
-    cells = []
-    for framework, task_outputs in sut_outputs.items():
-        if task.id in task_outputs:
-            cells.append((framework, task.id, task_outputs[task.id].raw_text))
-    if len(cells) < 2:
+
+    frameworks = list(sut_outputs.keys())
+    if len(frameworks) < 2:
         return None
-    return pairwise_rank(cells, judge_client, task)
+
+    # Aggregate wins + comparisons across per-task pairwise runs.
+    agg_wins: dict[str, float] = {f: 0.0 for f in frameworks}
+    agg_total: dict[str, int] = {f: 0 for f in frameworks}
+    agg_comparisons: list[dict] = []
+    tasks_used = 0
+    total_fallback = 0
+
+    for task in tasks:
+        cells = []
+        outputs_for_task = {}
+        for fw in frameworks:
+            if task.id in sut_outputs.get(fw, {}):
+                text = sut_outputs[fw][task.id].raw_text
+                if isinstance(text, str) and not text.startswith("ERROR:"):
+                    cells.append((fw, task.id, text))
+                    outputs_for_task[fw] = text
+        if len(cells) < 2:
+            continue
+        # Skip tasks where all SUT outputs are identical (no signal).
+        unique_outputs = set(outputs_for_task.values())
+        if len(unique_outputs) <= 1:
+            continue
+        tasks_used += 1
+        ranking = pairwise_rank(cells, judge_client, task)
+        for entry in ranking.ranking:
+            fw = entry["framework"]
+            agg_wins[fw] += entry.get("wins", 0)
+            agg_total[fw] += entry.get("total_comparisons", 0)
+        agg_comparisons.extend(ranking.pairwise_comparisons)
+        total_fallback += ranking.judge_fallback_count
+
+    if tasks_used == 0:
+        # No diverging tasks — fall back to first-task ranking.
+        task = tasks[0]
+        cells = [(fw, task.id, sut_outputs[fw][task.id].raw_text)
+                 for fw in frameworks if task.id in sut_outputs.get(fw, {})
+                 and isinstance(sut_outputs[fw][task.id].raw_text, str)
+                 and not sut_outputs[fw][task.id].raw_text.startswith("ERROR:")]
+        if len(cells) < 2:
+            return None
+        return pairwise_rank(cells, judge_client, task)
+
+    # Build final ranking from aggregated wins.
+    final_ranking = sorted(frameworks, key=lambda f: agg_wins.get(f, 0.0), reverse=True)
+    # BTL as win rate (Laplace-smoothed).
+    btl = {}
+    for fw in frameworks:
+        w = agg_wins.get(fw, 0.0)
+        n = max(agg_total.get(fw, 1), 1)
+        btl[fw] = (w + 0.5) / (n + 1.0)
+
+    return OrdinalRanking(
+        ranking=[
+            {"rank": r, "framework": fw, "btl_score": btl[fw],
+             "wins": agg_wins[fw], "total_comparisons": agg_total[fw]}
+            for r, fw in enumerate(final_ranking, 1)
+        ],
+        pairwise_comparisons=agg_comparisons,
+        total_pairs=len(agg_comparisons),
+        judge_fallback_count=total_fallback,
+    )
 
 
 async def run_gate(config: EvalConfig, baseline_path: Optional[str] = None, selected_frameworks: Optional[list[str]] = None) -> GateReport:
@@ -142,9 +208,19 @@ async def run_gate(config: EvalConfig, baseline_path: Optional[str] = None, sele
             baseline,
         )
 
-    gate_decision = "pass"
-    if drift and drift.is_regression:
+    errored = _collect_errored_frameworks(sut_outputs)
+    total_suts = len(sut_outputs)
+
+    # A run where most SUTs errored is a broken gate, regardless of drift.
+    # A 2-SUT "ranking" is not a valid cross-framework eval (SPEC §3 B1).
+    if total_suts > 0 and len(errored) > total_suts // 2:
         gate_decision = "fail"
+    elif drift:
+        gate_decision = "fail" if drift.is_regression else "pass"
+    else:
+        # No baseline loaded: cannot make a regression pass/fail call.
+        # "unknown" is honest; run.py treats it as exit 1 (not a clean pass).
+        gate_decision = "unknown"
 
     report = GateReport(
         run_id=meta["timestamp"],
@@ -153,6 +229,8 @@ async def run_gate(config: EvalConfig, baseline_path: Optional[str] = None, sele
         pairwise_ranking=ranking,
         drift_vs_baseline=drift,
         gate_decision=gate_decision,
+        errored_frameworks=errored,
+        pairwise_task_count=len(tasks),
     )
 
     # Tracing
@@ -164,3 +242,41 @@ async def run_gate(config: EvalConfig, baseline_path: Optional[str] = None, sele
     report._inspect_samples = export_to_inspect(report)  # type: ignore[attr-defined]
 
     return report
+
+
+def _collect_errored_frameworks(sut_outputs: dict[str, dict[str, SUTOutput]]) -> list[str]:
+    """Frameworks whose SUT run produced an ERROR marker instead of real output."""
+    errored = set()
+    for fw, task_outputs in sut_outputs.items():
+        for output in task_outputs.values():
+            # Defensive: some SUT adapters may produce a non-str raw_text
+            # (e.g. a parsed dict); coerce before checking the error prefix.
+            text = output.raw_text if isinstance(output.raw_text, str) else str(output.raw_text)
+            if text.startswith("ERROR:"):
+                errored.add(fw)
+                break
+    return sorted(errored)
+
+
+_FRAMEWORK_PACKAGE_NAMES: dict[str, str] = {
+    "openai_sdk": "openai-agents",
+    "pydantic_ai": "pydantic-ai",
+    "adk": "google-adk",
+    "strands": "strands-agents",
+    "langchain": "langchain",
+    "claude_agent_sdk": "anthropic",
+    "maf": "autogen-agentchat",
+    "crewai": "crewai",
+    "smolagents": "smolagents",
+}
+
+
+def _probe_framework_versions(framework_keys: list[str]) -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for key in framework_keys:
+        pkg = _FRAMEWORK_PACKAGE_NAMES.get(key, key)
+        try:
+            versions[key] = importlib.metadata.version(pkg)
+        except Exception:
+            versions[key] = "unknown"
+    return versions

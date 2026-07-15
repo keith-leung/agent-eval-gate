@@ -38,7 +38,7 @@ A common `AgentUnderTest` contract (`run(task) -> SUTOutput`) with thin adapters
 
 ### B3 — Ordinal pairwise ranking
 
-- Uses DeepEval Arena-style pairwise judging (`ArenaGEval`, `compare()`).
+- Uses a custom pairwise judge loop with a cross-vendor LLM judge (DeepEval `GEval` retained for absolute scoring). `ArenaGEval` was evaluated but does not fit a deterministic single-judge CI loop — see `SPEC_GAP.md`.
 - **Bradley-Terry-Luce** score computation from pairwise wins — built in-house.
 - Deterministic heuristic fallback per pair when a judge call fails.
 

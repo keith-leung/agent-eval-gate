@@ -16,19 +16,28 @@ async def run(client, task: Task) -> SUTOutput:
         from google.adk.agents import LlmAgent
         from google.adk.runners import Runner
         from google.adk.sessions import InMemorySessionService
-        from google.genai import types
 
-        # ADK natively expects Google models. For cross-vendor OpenAI-compatible
-        # endpoints, ADK does NOT support custom base_url as of 2026-07.
-        # We still implement the adapter; at runtime it will raise honestly
-        # unless the user has configured ADK for a compatible endpoint.
-        # If the endpoint is OpenAI-compatible, we fall back to a direct LLM call.
+        # ADK 2.4 locks to Google Gemini models — its model layer
+        # (gemini_llm_connection / google_llm) has no OpenAI-compatible path.
+        # SPEC §6 anticipated this: "verify at impl time whether ADK accepts a
+        # custom OpenAI-compatible endpoint or pins Google's; document whichever."
+        # It pins Google's. If the configured model is not a Gemini model,
+        # this SUT cannot run on the shared OpenAI-compatible SUT gateway and
+        # must be honestly marked unavailable rather than faked.
+        model_lower = (client.model or "").lower()
+        if "gemini" not in model_lower:
+            raise RuntimeError(
+                f"Google ADK locks to Gemini models and has no OpenAI-compatible "
+                f"endpoint path (ADK 2.4 model layer is Gemini-only). Configured "
+                f"SUT model '{client.model}' is not a Gemini model. To run this "
+                f"SUT, configure a Google API key + a gemini-* model for the "
+                f"'adk' provider in config.yaml. Marking unavailable."
+            )
+
         import time
         start = time.time()
-
-        # Attempt ADK native path first
         agent = LlmAgent(
-            name="eval-agent",
+            name="eval_agent",
             model=client.model,
             instruction="You are a helpful assistant. Answer concisely.",
         )

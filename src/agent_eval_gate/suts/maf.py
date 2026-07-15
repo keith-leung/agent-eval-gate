@@ -34,8 +34,18 @@ async def run(client, task: Task) -> SUTOutput:
                 model=client.model,
                 base_url=client.base_url,
                 api_key=client.api_key,
+                # autogen 0.6 requires explicit model_info when the model name
+                # is not a recognized OpenAI model (our SUT runs on step-3.7-flash
+                # via an OpenAI-compatible gateway, not a real OpenAI model).
+                model_info={
+                    "family": "unknown",
+                    "vision": False,
+                    "function_calling": True,
+                    "json_output": False,
+                    "structured_output": False,
+                },
             )
-            agent = AssistantAgent(name="eval-agent", model_client=model_client, system_message="You are a helpful assistant.")
+            agent = AssistantAgent(name="eval_agent", model_client=model_client, system_message="You are a helpful assistant.")
             result = await agent.run(task=task.prompt)
             raw_text = str(result)
         else:

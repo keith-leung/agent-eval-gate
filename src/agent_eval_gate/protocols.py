@@ -101,6 +101,8 @@ class OrdinalRanking:
     ranking: list[dict]  # [{framework, score, wins, ...}]
     pairwise_comparisons: list[dict]
     total_pairs: int
+    judge_fallback_count: int = 0
+    btl_fallback_used: bool = False
 
 
 @dataclass
@@ -110,4 +112,6 @@ class GateReport:
     per_task_verdicts: dict[str, dict[str, ItemVerdict]]  # task_id -> framework -> verdict
     pairwise_ranking: Optional[OrdinalRanking] = None
     drift_vs_baseline: Optional[DriftReport] = None
-    gate_decision: str = "pass"  # pass | fail | unknown
+    gate_decision: str = "unknown"  # pass | fail | unknown
+    errored_frameworks: list[str] = field(default_factory=list)
+    pairwise_task_count: int = 0

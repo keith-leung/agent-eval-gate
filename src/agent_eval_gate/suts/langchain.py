@@ -14,10 +14,10 @@ FRAMEWORK = "langchain"
 
 async def run(client, task: Task) -> SUTOutput:
     try:
+        # langchain 1.3 moved create_react_agent out of langchain.agents.
+        # The canonical home is now langgraph.prebuilt (the graph-based agent).
         from langchain_openai import ChatOpenAI
-        from langchain.agents import create_react_agent, AgentExecutor
-        from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-        from langchain_core.tools import tool
+        from langgraph.prebuilt import create_react_agent
 
         llm = ChatOpenAI(
             model=client.model,
@@ -26,24 +26,20 @@ async def run(client, task: Task) -> SUTOutput:
             temperature=0,
         )
 
-        @tool
-        def dummy_tool(query: str) -> str:
-            """A dummy tool for evaluation."""
-            return f"Dummy result for: {query}"
-
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are a helpful assistant. Answer concisely."),
-            ("human", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad"),
-        ])
-
-        agent = create_react_agent(llm=llm, tools=[dummy_tool], prompt=prompt)
-        executor = AgentExecutor(agent=agent, tools=[dummy_tool], verbose=False, handle_parsing_errors=True)
+        agent = create_react_agent(
+            model=llm,
+            tools=[],
+            prompt="You are a helpful assistant. Answer concisely.",
+        )
 
         start = time.time()
-        result = executor.invoke({"input": task.prompt})
+        result = agent.invoke({"messages": [{"role": "user", "content": task.prompt}]})
         latency_ms = (time.time() - start) * 1000.0
-        raw_text = result.get("output", "")
+        messages = result.get("messages", [])
+        raw_text = ""
+        if messages:
+            last = messages[-1]
+            raw_text = getattr(last, "content", str(last))
         return make_sut_output(task, FRAMEWORK, client.model, raw_text, latency_ms=latency_ms)
     except Exception as exc:
         raise RuntimeError(f"LangChain adapter failed: {exc}") from exc

@@ -1,17 +1,37 @@
-"""Unified LLM client supporting OpenAI-compatible and Anthropic APIs."""
+"""Unified LLM client supporting OpenAI-compatible and Anthropic APIs.
+
+Includes retry with exponential backoff for transient errors (429 rate
+limit, 5xx) so a dense eval run (8 SUTs × 16 tasks + pairwise) does not
+crash on the gateway's rate limiter.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import time
 from typing import Any, Optional
 
-from openai import AsyncOpenAI, OpenAI
+from openai import AsyncOpenAI, OpenAI, APIStatusError
 from anthropic import AsyncAnthropic, Anthropic
 
 from agent_eval_gate.protocols import Task
+
+
+_MAX_RETRIES = 4
+_RETRY_BASE_DELAY = 2.0  # seconds
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """True for 429 / 5xx (transient gateway errors worth retrying)."""
+    status = getattr(exc, "status_code", None)
+    if status is None and getattr(exc, "response", None) is not None:
+        status = getattr(exc.response, "status_code", None)
+    if status is not None:
+        return status == 429 or status >= 500
+    return isinstance(exc, (TimeoutError, ConnectionError, OSError))
 
 
 class LLMClient:
@@ -37,10 +57,14 @@ class LLMClient:
 
         if api_type == "anthropic":
             self._anthropic = AsyncAnthropic(base_url=base_url, api_key=api_key)
+            self._sync_anthropic = Anthropic(base_url=base_url, api_key=api_key)
             self._openai = None
+            self._sync_openai = None
         else:
             self._openai = AsyncOpenAI(base_url=base_url, api_key=api_key)
+            self._sync_openai = OpenAI(base_url=base_url, api_key=api_key)
             self._anthropic = None
+            self._sync_anthropic = None
 
     async def complete(
         self,
@@ -99,9 +123,18 @@ class LLMClient:
             call_kwargs["tools"] = tools
         call_kwargs.update(kwargs)
 
-        response = await self._openai.chat.completions.create(**call_kwargs)
-        content = response.choices[0].message.content or ""
-        return content
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                response = await self._openai.chat.completions.create(**call_kwargs)
+                content = response.choices[0].message.content or ""
+                return content
+            except Exception as exc:
+                last_exc = exc
+                if not _is_retryable(exc) or attempt == _MAX_RETRIES - 1:
+                    raise
+                await asyncio.sleep(_RETRY_BASE_DELAY * (2 ** attempt))
+        raise last_exc  # unreachable
 
     async def _anthropic_complete(
         self,
@@ -117,7 +150,6 @@ class LLMClient:
         msgs = messages or []
         if user_message:
             msgs.append({"role": "user", "content": user_message})
-        # If no messages, at least send something
         if not msgs:
             msgs = [{"role": "user", "content": user_message or "Hello"}]
 
@@ -134,9 +166,59 @@ class LLMClient:
             call_kwargs["temperature"] = temperature
         call_kwargs.update(kwargs)
 
-        response = await self._anthropic.messages.create(**call_kwargs)
-        content = response.content[0].text if response.content else ""
-        return content
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                response = await self._anthropic.messages.create(**call_kwargs)
+                # Extract first text block (skip ThinkingBlock).
+                for block in response.content:
+                    if getattr(block, "text", None):
+                        return block.text
+                return ""
+            except Exception as exc:
+                last_exc = exc
+                if not _is_retryable(exc) or attempt == _MAX_RETRIES - 1:
+                    raise
+                await asyncio.sleep(_RETRY_BASE_DELAY * (2 ** attempt))
+        raise last_exc  # unreachable
+
+    def complete_sync(
+        self,
+        system: str = "",
+        user_message: str = "",
+        messages: Optional[list[dict]] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        tier: Optional[str] = None,  # accepted for API compat, unused
+        **kwargs: Any,
+    ) -> str:
+        """Synchronous completion (for judge paths that are not async).
+
+        Runs the async ``complete`` in an event loop, with the same retry
+        + backoff as the async path.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We are inside a running loop (e.g. the async gate). Create a
+                # fresh loop in a thread to avoid "loop already running".
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    return pool.submit(
+                        lambda: asyncio.run(self.complete(
+                            system=system, user_message=user_message, messages=messages,
+                            model=model, temperature=temperature, max_tokens=max_tokens,
+                            **kwargs,
+                        ))
+                    ).result()
+        except RuntimeError:
+            pass
+        return asyncio.run(self.complete(
+            system=system, user_message=user_message, messages=messages,
+            model=model, temperature=temperature, max_tokens=max_tokens,
+            **kwargs,
+        ))
 
     def compute_provenance_hash(self, task: Task, output: "SUTOutput") -> str:
         """Compute SHA-256 lineage hash for a task-output pair."""

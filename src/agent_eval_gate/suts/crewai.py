@@ -14,14 +14,15 @@ FRAMEWORK = "crewai"
 
 async def run(client, task: Task) -> SUTOutput:
     try:
-        from crewai import Agent, Task as CrewTask, Crew
-        from langchain_openai import ChatOpenAI
+        # CrewAI 1.15 ships its own LLM wrapper that accepts an OpenAI-
+        # compatible base_url directly — preferable to routing through
+        # langchain_openai.ChatOpenAI, which crewai no longer requires.
+        from crewai import Agent, Task as CrewTask, Crew, LLM
 
-        llm = ChatOpenAI(
+        llm = LLM(
             model=client.model,
-            openai_api_base=client.base_url,
-            openai_api_key=client.api_key,
-            temperature=0,
+            base_url=client.base_url,
+            api_key=client.api_key,
         )
 
         agent = Agent(
@@ -39,9 +40,10 @@ async def run(client, task: Task) -> SUTOutput:
         )
 
         crew = Crew(agents=[agent], tasks=[crew_task], verbose=False)
-        import time
         start = time.time()
-        result = crew.kickoff()
+        # The adapter runs inside an async event loop; crew.kickoff() is
+        # synchronous and would deadlock — use kickoff_async().
+        result = await crew.kickoff_async()
         latency_ms = (time.time() - start) * 1000.0
         raw_text = str(result.raw) if hasattr(result, "raw") else str(result)
         return make_sut_output(task, FRAMEWORK, client.model, raw_text, latency_ms=latency_ms)

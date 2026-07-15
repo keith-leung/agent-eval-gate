@@ -14,10 +14,16 @@ FRAMEWORK = "pydantic_ai"
 
 async def run(client, task: Task) -> SUTOutput:
     try:
+        from openai import AsyncOpenAI
         from pydantic_ai import Agent
-        from pydantic_ai.models.openai import OpenAIModel
+        from pydantic_ai.models.openai import OpenAIChatModel
+        from pydantic_ai.providers.openai import OpenAIProvider
 
-        model = OpenAIModel(client.model, base_url=client.base_url, api_key=client.api_key)
+        # pydantic-ai 2.6 renamed OpenAIModel -> OpenAIChatModel and moved
+        # base_url/api_key into an OpenAIProvider wrapping an AsyncOpenAI client.
+        openai_client = AsyncOpenAI(base_url=client.base_url, api_key=client.api_key)
+        provider = OpenAIProvider(openai_client=openai_client)
+        model = OpenAIChatModel(client.model, provider=provider)
         agent = Agent(model=model, system_prompt="You are a helpful assistant. Answer concisely.")
 
         start = time.time()

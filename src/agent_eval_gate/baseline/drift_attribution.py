@@ -33,16 +33,50 @@ def build_baseline(
     )
 
 
+def _mean_score_delta(
+    new_report: GateReport,
+    baseline: Baseline,
+) -> float | None:
+    """Mean per-task score delta (new - baseline) across matching task ids.
+
+    Returns None if no comparable scores exist (e.g. baseline has empty
+    scores_per_task, or task sets don't overlap).
+    """
+    baseline_scores = baseline.scores_per_task or {}
+    if not baseline_scores:
+        return None
+    deltas: list[float] = []
+    # per_task_verdicts is {task_id: {framework: ItemVerdict}}
+    # baseline_scores is {task_id: {framework: score}}
+    for task_id, framework_verdicts in new_report.per_task_verdicts.items():
+        for framework, verdict in framework_verdicts.items():
+            base = baseline_scores.get(task_id, {}).get(framework)
+            if base is None:
+                continue
+            deltas.append(verdict.score - base)
+    if not deltas:
+        return None
+    return sum(deltas) / len(deltas)
+
+
+_REGRESSION_THRESHOLD = 0.05  # mean score drop beyond this = regression
+
+
 def compare_to_baseline(
     new_report: GateReport,
     baseline: Baseline,
 ) -> DriftReport:
-    """Attribute score delta to model / framework / data / judge drift."""
+    """Attribute score delta to model / framework / data / judge drift.
+
+    Per SPEC §3 B4: regression = (accuracy delta < -threshold) AND drift is
+    NOT judge drift. is_regression therefore depends on the observed score
+    delta, not merely on which axis changed.
+    """
     new_meta = new_report.run_meta
     new_tasks_sha = new_meta.get("tasks_sha256", "")
     new_judge = new_meta.get("judge_model", "")
 
-    # Data drift
+    # Data drift — baseline invalid for direct comparison; not a regression call.
     if new_tasks_sha != baseline.tasks_sha256:
         return DriftReport(
             axis="data",
@@ -52,40 +86,51 @@ def compare_to_baseline(
             score_delta=None,
         )
 
+    # Compute the comparable score delta once (data is unchanged here).
+    delta = _mean_score_delta(new_report, baseline)
+
     # Model drift
     new_sut_models = new_meta.get("sut_models", {})
     if new_sut_models != baseline.model_pins:
         changed = {k: (baseline.model_pins.get(k), new_sut_models.get(k)) for k in new_sut_models if baseline.model_pins.get(k) != new_sut_models.get(k)}
+        is_reg = delta is not None and delta < -_REGRESSION_THRESHOLD
         return DriftReport(
             axis="model",
-            evidence=f"SUT model pins changed: {changed}",
+            evidence=f"SUT model pins changed: {changed}; mean_score_delta={delta}",
             recommendation="Verify the new model performs on par before promoting.",
-            is_regression=True,
+            is_regression=is_reg,
+            score_delta=delta,
         )
 
     # Framework drift
     new_fw = new_meta.get("framework_versions", {})
     if new_fw != baseline.framework_pins:
         changed = {k: (baseline.framework_pins.get(k), new_fw.get(k)) for k in new_fw if baseline.framework_pins.get(k) != new_fw.get(k)}
+        is_reg = delta is not None and delta < -_REGRESSION_THRESHOLD
         return DriftReport(
             axis="framework",
-            evidence=f"Framework versions changed: {changed}",
+            evidence=f"Framework versions changed: {changed}; mean_score_delta={delta}",
             recommendation="Re-run baseline with the new framework version to isolate.",
-            is_regression=True,
+            is_regression=is_reg,
+            score_delta=delta,
         )
 
-    # Judge drift
+    # Judge drift — never a regression (the SUT didn't worsen; the judge moved).
     if new_judge != baseline.judge_pin:
         return DriftReport(
             axis="judge",
-            evidence=f"Judge model changed: baseline={baseline.judge_pin} new={new_judge}",
+            evidence=f"Judge model changed: baseline={baseline.judge_pin} new={new_judge}; mean_score_delta={delta}",
             recommendation="Re-run old judge against new outputs to confirm SUT did not regress.",
             is_regression=False,
+            score_delta=delta,
         )
 
+    # No axis changed — regression iff scores actually dropped.
+    is_reg = delta is not None and delta < -_REGRESSION_THRESHOLD
     return DriftReport(
         axis="none",
-        evidence="No axis changed relative to baseline.",
-        recommendation="No action required.",
-        is_regression=False,
+        evidence=f"No axis changed relative to baseline; mean_score_delta={delta}",
+        recommendation="No action required." if not is_reg else "Scores dropped with no axis change — investigate judge noise.",
+        is_regression=is_reg,
+        score_delta=delta,
     )

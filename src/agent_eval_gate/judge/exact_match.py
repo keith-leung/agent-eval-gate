@@ -36,7 +36,9 @@ def _extract_json(text: str) -> dict:
 def exact_match_evaluate(task: Task, output_text: str, judge_model: str = "mock", judge_vendor: str = "mock") -> ItemVerdict:
     """Deterministic fallback: exact string match on expected."""
     expected = str(task.expected).strip().lower()
-    predicted = output_text.strip().lower()
+    # Defensive: some SUT outputs may arrive as a non-str (e.g. a parsed dict);
+    # coerce to str so this final tier never crashes on type.
+    predicted = str(output_text).strip().lower() if not isinstance(output_text, str) else output_text.strip().lower()
 
     score = 1.0 if expected in predicted or predicted in expected else 0.0
     reason = f"Exact-match fallback. Expected='{expected}', predicted='{predicted[:200]}'."

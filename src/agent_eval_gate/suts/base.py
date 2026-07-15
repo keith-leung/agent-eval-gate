@@ -11,10 +11,12 @@ from agent_eval_gate.llm_client import LLMClient
 
 
 def make_sut_output(task: Task, framework: str, model: str, raw_text: str, **kwargs) -> SUTOutput:
-    from agent_eval_gate.llm_client import LLMClient
+    # Defensive: some SUT adapters may pass a non-str (e.g. a parsed dict or
+    # an framework result object) as raw_text. Coerce to str at the source so
+    # every downstream consumer (judge, pairwise, errored check) sees a str.
+    if not isinstance(raw_text, str):
+        raw_text = str(raw_text)
 
-    # We need a temporary client to compute provenance hash, or just use raw fields.
-    # For simplicity, compute a lightweight hash here without needing the full client.
     import hashlib, json
     payload = {
         "task_id": task.id,

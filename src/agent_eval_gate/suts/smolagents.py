@@ -14,17 +14,17 @@ FRAMEWORK = "smolagents"
 
 async def run(client, task: Task) -> SUTOutput:
     try:
-        from smolagents import CodeAgent, HfApiModel, LiteLLMModel
+        # smolagents 1.26 removed HfApiModel from the top-level export and
+        # expects OpenAIServerModel for OpenAI-compatible endpoints.
+        from smolagents import CodeAgent, OpenAIServerModel
 
-        # Prefer LiteLLM if the base_url is OpenAI-compatible
-        model = LiteLLMModel(
-            model_id=f"openai/{client.model}",
+        model = OpenAIServerModel(
+            model_id=client.model,
             api_base=client.base_url,
             api_key=client.api_key,
         )
         agent = CodeAgent(tools=[], model=model)
 
-        import time
         start = time.time()
         result = agent.run(task.prompt)
         latency_ms = (time.time() - start) * 1000.0

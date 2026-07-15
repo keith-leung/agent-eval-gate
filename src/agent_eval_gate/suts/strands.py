@@ -17,7 +17,17 @@ async def run(client, task: Task) -> SUTOutput:
         from strands import Agent
         from strands.models.openai import OpenAIModel
 
-        model = OpenAIModel(client.model, client_id=client.api_key, base_url=client.base_url)
+        # Strands' OpenAIModel takes client_args (passed to the OpenAI client)
+        # and model_id as a direct kwarg (Unpack[OpenAIConfig]). The positional
+        # (model, client_id, base_url) signature used in older strands no
+        # longer exists.
+        model = OpenAIModel(
+            client_args={
+                "api_key": client.api_key,
+                "base_url": client.base_url,
+            },
+            model_id=client.model,
+        )
         agent = Agent(model=model, system_prompt="You are a helpful assistant. Answer concisely.")
 
         start = time.time()
