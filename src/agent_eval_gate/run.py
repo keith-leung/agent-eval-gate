@@ -9,6 +9,40 @@ import os
 import sys
 from typing import Optional
 
+# Disable OpenAI Agents SDK tracing BEFORE the `agents` package is imported
+# anywhere. Without this, its BackendSpanExporter retries a (missing/invalid)
+# OPENAI_API_KEY with exponential backoff on background threads that never exit,
+# hanging the whole process — the CI hang Trae diagnosed. Must be set pre-import.
+os.environ.setdefault("OPENAI_AGENTS_DISABLE_TRACING", "1")
+
+# Silence benign teardown noise. SUT adapters run in per-thread event loops
+# (to isolate blocking framework calls); the framework HTTP clients they create
+# schedule their async close during GC, after that loop is gone, emitting
+# "Event loop is closed" tracebacks. These fire AFTER results are collected and
+# have zero effect on the report or exit code. Filter exactly those two messages.
+import logging as _logging
+
+
+class _DropClosedLoopNoise(_logging.Filter):
+    def filter(self, record: _logging.LogRecord) -> bool:  # noqa: A003
+        m = record.getMessage()
+        return "Event loop is closed" not in m and "Task exception was never retrieved" not in m
+
+
+_logging.getLogger("asyncio").addFilter(_DropClosedLoopNoise())
+
+_prev_unraisablehook = sys.unraisablehook
+
+
+def _quiet_unraisable(unraisable) -> None:
+    exc = getattr(unraisable, "exc_value", None)
+    if isinstance(exc, RuntimeError) and "Event loop is closed" in str(exc):
+        return
+    _prev_unraisablehook(unraisable)
+
+
+sys.unraisablehook = _quiet_unraisable
+
 from agent_eval_gate.config import EvalConfig
 from agent_eval_gate.gate import run_gate
 from agent_eval_gate.baseline import push_baseline, build_baseline
@@ -42,7 +76,9 @@ def main() -> int:
         if report.pairwise_ranking:
             print("\nPairwise ranking:")
             for entry in report.pairwise_ranking.ranking:
-                print(f"  #{entry['rank']} {entry['framework']} (score={entry['btl_score']:.3f}, wins={entry['wins']})")
+                sc = entry.get("btl_score")
+                sc_str = f"{sc:.3f}" if isinstance(sc, (int, float)) else str(entry.get("status", "did_not_run"))
+                print(f"  #{entry.get('rank', '-')} {entry['framework']} (score={sc_str}, wins={entry.get('wins', 0)})")
         if report.drift_vs_baseline:
             d = report.drift_vs_baseline
             print(f"\nDrift report: axis={d.axis} is_regression={d.is_regression}")
@@ -59,7 +95,10 @@ def main() -> int:
                 "run_id": report.run_id,
                 "run_meta": report.run_meta,
                 "gate_decision": report.gate_decision,
+                "errored_frameworks": report.errored_frameworks,
                 "pairwise_ranking": report.pairwise_ranking.ranking if report.pairwise_ranking else None,
+                "pairwise_btl_fallback_used": report.pairwise_ranking.btl_fallback_used if report.pairwise_ranking else None,
+                "pairwise_judge_fallback_count": report.pairwise_ranking.judge_fallback_count if report.pairwise_ranking else 0,
                 "drift_vs_baseline": report.drift_vs_baseline.__dict__ if report.drift_vs_baseline else None,
             }, f, indent=2, ensure_ascii=False, default=str)
         print(f"\nReport saved to {out_path}")

@@ -46,6 +46,7 @@ class LLMClient:
         model: str = "step-3.7-flash",
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        mode: str = "real",
     ) -> None:
         self.provider = provider
         self.base_url = base_url
@@ -54,6 +55,7 @@ class LLMClient:
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.mode = mode
 
         if api_type == "anthropic":
             self._anthropic = AsyncAnthropic(base_url=base_url, api_key=api_key)
@@ -66,6 +68,31 @@ class LLMClient:
             self._anthropic = None
             self._sync_anthropic = None
 
+    def _mock_response(
+        self, system: str, user_message: str, messages: Optional[list[dict]]
+    ) -> str:
+        """Deterministic, input-derived, offline response for mock/CI mode.
+
+        Emits a JSON object carrying the fields every judge/pairwise parser in
+        this repo reads (``winner``/``score``/``confidence``/``faithfulness``),
+        derived from a hash of the inputs so outputs vary per call (non-degenerate
+        ranking) yet are fully deterministic and require no network.
+        """
+        import hashlib
+        import json as _json
+
+        basis = (system or "") + (user_message or "") + _json.dumps(messages or [], ensure_ascii=False)
+        h = int(hashlib.sha256(basis.encode("utf-8")).hexdigest(), 16)
+        score = round((h % 100) / 100.0, 2)
+        winner = "A" if (h % 2 == 0) else "B"
+        return _json.dumps({
+            "winner": winner,
+            "score": score,
+            "confidence": 0.5,
+            "faithfulness": score,
+            "reasoning": "deterministic mock (offline CI mode)",
+        }, ensure_ascii=False)
+
     async def complete(
         self,
         system: str = "",
@@ -75,9 +102,12 @@ class LLMClient:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         tools: Optional[list[dict]] = None,
+        tier: Optional[str] = None,  # accepted for API compat, unused (the client is already tier-scoped)
         **kwargs: Any,
     ) -> str:
         """Call the LLM and return the raw text response."""
+        if self.mode == "mock":
+            return self._mock_response(system, user_message, messages)
         model = model or self.model
         temperature = temperature if temperature is not None else self.temperature
         max_tokens = max_tokens if max_tokens is not None else self.max_tokens
@@ -198,6 +228,8 @@ class LLMClient:
         Runs the async ``complete`` in an event loop, with the same retry
         + backoff as the async path.
         """
+        if self.mode == "mock":
+            return self._mock_response(system, user_message, messages)
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():

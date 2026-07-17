@@ -103,6 +103,7 @@ class EvalConfig:
             api_key=provider.api_key,
             api_type=provider.api_type,
             model=model,
+            mode=self.mode,
         )
 
     def get_judge_client(self) -> "LLMClient":
@@ -118,4 +119,5 @@ class EvalConfig:
             api_key=provider.api_key,
             api_type=provider.api_type,
             model=model,
+            mode=self.mode,
         )

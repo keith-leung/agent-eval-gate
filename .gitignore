@@ -60,3 +60,16 @@ shared/
 HANDOFF.md
 SPEC.md
 REPORT.md
+
+# Debug scratch (R4)
+B_HANG_FIX_REPORT.md
+_*.json
+_*.log
+_*.py
+
+# --- Internal build/process docs (not part of the public artifact) ---
+EVIDENCE*.md
+WORK_ORDER*.md
+*HANG_FIX*.md
+SPEC_GAP.md
+HANDOFF.md

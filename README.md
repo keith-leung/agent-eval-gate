@@ -38,7 +38,7 @@ A common `AgentUnderTest` contract (`run(task) -> SUTOutput`) with thin adapters
 
 ### B3 — Ordinal pairwise ranking
 
-- Uses a custom pairwise judge loop with a cross-vendor LLM judge (DeepEval `GEval` retained for absolute scoring). `ArenaGEval` was evaluated but does not fit a deterministic single-judge CI loop — see `SPEC_GAP.md`.
+- Uses a custom pairwise judge loop with a cross-vendor LLM judge (DeepEval `GEval` retained for absolute scoring). `ArenaGEval` was evaluated but does not fit a deterministic single-judge CI loop.
 - **Bradley-Terry-Luce** score computation from pairwise wins — built in-house.
 - Deterministic heuristic fallback per pair when a judge call fails.
 
@@ -103,15 +103,6 @@ This repo demonstrates the 2026 cross-framework eval vocabulary:
 **Method terms:** cross-vendor LLM-as-judge, judge-model independence, self-preference bias mitigation, ordinal pairwise ranking, Bradley-Terry-Luce, regression baseline, drift attribution, SHA-256 lineage
 
 **Standard benchmarks:** GAIA, SWE-bench Verified, Tau-Bench, Cybench / GDM CTF
-
-## Origin
-
-Patterns lifted from reference files:
-
-- `reference/evaluator.py` — two-path evaluator (GEval + exact-match fallback)
-- `reference/risk_ranker.py` — ordinal pairwise ranking + `_extract_json` tolerance
-- `reference/lineage.py` — streaming SHA-256 + append-only ledger
-- `reference/q3_structured_faithfulness.py` — typed-output + faithfulness judge shape
 
 ## License
 
